@@ -41,8 +41,9 @@ MCS_TEST_REGIME=true|false
 *Only LIST_BLOBS and CREATE_CONTAINER are implemented at the moment.*
 
 ## Testing and fooling around
- * get your [Azurite container up and running](https://github.com/arafato/azurite#docker-image)
- * ```
+ * Get your [Azurite container up and running](https://github.com/arafato/azurite#docker-image):
+
+ ```
 ./mod_cloud_storage \
 --action CREATE_CONTAINER \
 --azure_storage_key Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw== \
@@ -59,5 +60,3 @@ MCS_TEST_REGIME=true|false
  * set blob_store_url to blob.core.windows.net
  * set azure_storage_account to your actual storage account name
  * *Do not use a storage account with valuable containers in it. This tool is just a toy.*
-
-
