@@ -4,6 +4,7 @@ Storing and reading BLOBs to and from a cloud service.
 # Building
  * cmake
  * APR, APR Util
+ * cURL
  * OpenSSL
 
 # Releases and Downloads

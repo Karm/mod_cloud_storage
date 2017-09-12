@@ -27,7 +27,7 @@
 #include <openssl/sha.h>
 
 // TODO: CMake injected version?
-#define USER_AGENT   "mod_cloud_storage 0.2"
+#define USER_AGENT   "mod_cloud_storage 0.3"
 
 //TODO: Isn't it just stupid to assume 1K? Make it configurable? LIST_BLOBS XML response listing 1 blob called "test" is 630 bytes long...
 #define INITIAL_RESPONSE_MEM 1024
