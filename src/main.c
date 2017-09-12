@@ -19,17 +19,15 @@
 #include <apr_escape.h>
 #include <apr_pools.h>
 #include <apr_file_info.h>
+#include <apr_md5.h>
 
 #include <curl/curl.h>
 
 #include <openssl/hmac.h>
 #include <openssl/sha.h>
 
-
-// TODO: Content types?
-#define CONTENT_TYPE "Content-Type: application/octet-stream"
 // TODO: CMake injected version?
-#define USER_AGENT   "Hahahaha! 0.0"
+#define USER_AGENT   "mod_cloud_storage 0.2"
 
 //TODO: Isn't it just stupid to assume 1K? Make it configurable? LIST_BLOBS XML response listing 1 blob called "test" is 630 bytes long...
 #define INITIAL_RESPONSE_MEM 1024
@@ -37,18 +35,20 @@
 //Azure constants  (TODO: some namespace system...?)
 #define AUTHORIZATION "SharedKey"
 
-
 //TODO: Error and Debug messages...
 #define DEBUG 1
 #define DIE(X, ...) fprintf(stderr, "ERROR %s:%d: " X "\n", __FILE__, __LINE__, ##__VA_ARGS__); exit(EXIT_FAILURE);
 #define ERR_MSG(fmt, ...) fprintf(stderr, fmt, ##__VA_ARGS__)
-#define DEBUG_MSG(fmt, ...) do { if (DEBUG) fprintf(stderr, fmt, __VA_ARGS__); } while (0)
+#define DEBUG_MSG(fmt, ...) do { if (DEBUG) {fprintf(stderr, fmt, ##__VA_ARGS__);}} while (0)
 
+// Global context
 CURL *curl;
-struct my_response data;
+const struct my_response data;
 FILE *headerfile;
 struct curl_slist *headers = NULL;
+// Global, due to cURL callback functions, TODO: Find a better way.
 apr_pool_t *pool;
+apr_size_t file_length;
 
 struct my_response {
     size_t size;
@@ -106,6 +106,12 @@ static size_t write_callback(void *contents, size_t size, size_t nmemb, void *us
     return realsize;
 }
 
+static size_t read_callback(void *ptr, size_t size, size_t nmemb, void *stream) {
+    // This API is designed to read from files, streams, but we already did that, we have the data ready.
+    memcpy(ptr, stream, file_length);
+    return file_length;
+}
+
 const char* produce_authorization_header(char* azure_storage_key, char* azure_storage_account, char* string_to_sign) {
     // Decoding base64 key to binary and signing the request.
     const char* base64_decoded_key = apr_palloc(pool, APR_ALIGN_DEFAULT(apr_base64_decode_len(azure_storage_key)));
@@ -119,7 +125,6 @@ const char* produce_authorization_header(char* azure_storage_key, char* azure_st
 int main(int argc, char *argv[]) {
 
     apr_status_t rv;
-    //apr_file_t *fp;
 
     rv = apr_initialize();
     if (rv != APR_SUCCESS) {
@@ -229,7 +234,7 @@ int main(int argc, char *argv[]) {
         DIE("Action must be specified either as an env var MCS_ACTION or as a parameter --action with possible values: <READ_BLOB|WRITE_BLOB|LIST_BLOBS|CREATE_CONTAINER>\n");
     }
 
-    // TODO: 512 bit, base64, 84 ish + padding...?
+    // TODO: 512 bit, base64, 84 ish + padding?... Smaller cannot be valid.
     if(!conf->azure_storage_key || strlen(conf->azure_storage_key) < 80) {
         DIE("Azure_storage_key must be specified either as an env var MCS_AZURE_STORAGE_KEY or as a parameter --azure_storage_key with its string value being at least 80 characters long.\n");
     }
@@ -247,7 +252,8 @@ int main(int argc, char *argv[]) {
     }
 
     if(!conf->blob_store_url || strlen(conf->blob_store_url) < 8) {
-        DIE("Blob_store_url must be specified either as an env var MCS_BLOB_STORE_URL or as a parameter --blob_store_url with its string value being at least 8 characters long including schema (https or http).\n");
+       // Set a reasonable default: https://docs.microsoft.com/en-us/azure/storage/common/storage-create-storage-account#storage-account-endpoints
+        conf->blob_store_url= "blob.core.windows.net";
     }
 
     if(strncmp(conf->blob_store_url, "http", 4) == 0) {
@@ -262,33 +268,143 @@ int main(int argc, char *argv[]) {
         ERR_MSG("Warning: TEST_REGIME is not enabled and yet the blob_store_url seems to point to something else than blob.core.windows.net: %s\n", conf->blob_store_url);
     }
 
-    /*
-    TODO: Print configuration before use
-    Debug macro? Verbose logging?
-
-    if(conf->action & UNDEFINED) {
-        ERR_MSG("UNDEFINED\n");
-    }
-    if(conf->action & READ_BLOB) {
-        ERR_MSG("READ_BLOB\n");
-    }
-    if(conf->action & WRITE_BLOB) {
-        ERR_MSG("WRITE_BLOB\n");
-    }
-    if(conf->action & LIST_BLOBS) {
-        ERR_MSG("LIST_BLOBS\n");
-    }
-    if(conf->action & CREATE_CONTAINER) {
-        ERR_MSG("CREATE_CONTAINER\n");
-    }
-    if(conf->action & TEST_REGIME) {
-        ERR_MSG("TEST_REGIME\n");
-    }
-    */
-
     curl_global_init(CURL_GLOBAL_DEFAULT);
     curl = curl_easy_init();
     if(curl) {
+        // Common variables
+        const char* url;
+        const char* request_method;
+        char request_date[APR_RFC822_DATE_LEN];
+        apr_rfc822_date(request_date,apr_time_now());
+        // TODO: Probably could remain fixed. The API version is intimatelydd
+        const char* storage_service_version="2016-05-31";
+        // https://docs.microsoft.com/en-us/rest/api/storageservices/put-blob#request-headers-all-blob-types
+        const char* client_request_id = "mod_cloud_storage";
+        // HTTP Request headers
+        const char* x_ms_date_h = apr_pstrcat(pool, "x-ms-date:", request_date, NULL);
+        const char* x_ms_version_h = apr_pstrcat(pool, "x-ms-version:", storage_service_version, NULL);
+        const char* x_ms_client_request_id_h = apr_pstrcat(pool,"x-ms-client-request-id:", client_request_id, NULL);
+
+        const char* canonicalized_headers;
+        const char* canonicalized_resource;
+        // See for all those \n: https://docs.microsoft.com/en-us/rest/api/storageservices/authentication-for-the-azure-storage-services
+        char* string_to_sign;
+
+        // Writing/Reading Blobs
+        const char* x_ms_blob_content_type_h = "x-ms-blob-content-type:application/octet-stream";
+        const char* x_content_type_h = "Content-Type:application/octet-stream";
+        const char* x_ms_blob_type_h = "x-ms-blob-type:BlockBlob";
+        char* x_content_length_h = "Content-Length:0";
+        const char* x_ms_blob_content_md5;
+        const char* file_length_str;
+        unsigned char file_md5sum_digest[APR_MD5_DIGESTSIZE];
+        const char* file_md5sum_base64;
+        apr_file_t *filep = NULL;
+        apr_finfo_t file_info;
+        char* file_data;
+
+        // ACTIONS
+        if(conf->action & CREATE_CONTAINER || conf->action & WRITE_BLOB) {
+            request_method="PUT";
+        } else {
+            request_method="GET";
+        }
+
+        if(conf->action & CREATE_CONTAINER) {
+            canonicalized_headers = apr_pstrcat(pool, x_ms_client_request_id_h, "\n", x_ms_date_h, "\n", x_ms_version_h, NULL);
+            canonicalized_resource = apr_pstrcat(pool, "/", conf->azure_storage_account, "/", conf->azure_container, "\nrestype:container", NULL);
+            string_to_sign = apr_pstrcat(pool, request_method,"\n\n\n\n\n\n\n\n\n\n\n\n", canonicalized_headers, "\n", canonicalized_resource, NULL);
+
+            if(conf->action & TEST_REGIME) {
+                url = apr_pstrcat(pool, "http://", conf->blob_store_url, "/", conf->azure_storage_account, "/", conf->azure_container, "?restype=container", NULL);
+            } else {
+                url = apr_pstrcat(pool, "https://", conf->azure_storage_account, ".", conf->blob_store_url, "/", conf->azure_container, "?restype=container", NULL);
+            }
+        } else if(conf->action & LIST_BLOBS) {
+            canonicalized_headers = apr_pstrcat(pool, x_ms_client_request_id_h, "\n", x_ms_date_h, "\n", x_ms_version_h, NULL);
+            canonicalized_resource = apr_pstrcat(pool, "/", conf->azure_storage_account, "/", conf->azure_container, "\ncomp:list\nrestype:container", NULL);
+            string_to_sign = apr_pstrcat(pool, request_method,"\n\n\n\n\n\n\n\n\n\n\n\n", canonicalized_headers, "\n", canonicalized_resource, NULL);
+
+            if(conf->action & TEST_REGIME) {
+                url = apr_pstrcat(pool, "http://", conf->blob_store_url, "/", conf->azure_storage_account, "/", conf->azure_container, "?restype=container&comp=list", NULL);
+            } else {
+                url = apr_pstrcat(pool, "https://", conf->azure_storage_account, ".", conf->blob_store_url, "/", conf->azure_container, "?restype=container&comp=list", NULL);
+            }
+        } else if(conf->action & WRITE_BLOB) {
+            if(conf->path_to_file && strlen(conf->path_to_file) > 0) {
+                rv = apr_file_open(&filep, conf->path_to_file, APR_READ|APR_BUFFERED, APR_OS_DEFAULT, pool);
+                if (rv != APR_SUCCESS) {
+                    DIE("Path to file %s was specified, but it doesn't exist or cannot be read.\n", conf->path_to_file);
+                }
+                DEBUG_MSG("Reading from file.\n");
+            } else {
+                rv = apr_file_open_stdin(&filep, pool);
+                DEBUG_MSG("Reading from stdin\n");
+                if (rv != APR_SUCCESS) {
+                    DIE("Cannot open stdin and neither MCS_PATH_TO_FILE env var nor --path_to_file was specified.\n");
+                }
+            }
+            if (apr_file_info_get(&file_info, APR_FINFO_SIZE, filep) == APR_SUCCESS) {
+                DEBUG_MSG("BLOB to be uploaded length: %ld\n", file_info.size);
+                if(file_info.size < 1) {
+                    DIE("Neither a file on path specified by MCS_PATH_TO_FILE env var nor --path_to_file nor stdin contains any bytes to read. Empty input?\n");
+                }
+            }
+            // TODO: Verify if pertinent...
+            //       head -c256  /dev/urandom | xxd -p -c256 > /home/karm/Projects/mod_cloud_storage/testdata
+            //if(fi.size < 512) {
+            //    ERR_MSG("Warning: The BLOB to be written is only %ld long. The smallest write operation is 512B. The rest of the blob will be zeroes.\n", file_info.size);
+            //}
+            file_data = apr_palloc(pool, file_info.size);
+            rv = apr_file_read_full(filep, file_data, file_info.size, &file_length);
+            if (rv != APR_SUCCESS) {
+                if (rv != APR_SUCCESS) {
+                    DIE("Cannot read data to create the BLOB. Check your input, please. We expected %ld bytes to read.\n", file_info.size);
+                }
+            }
+            apr_file_close(filep);
+            rv = apr_md5(file_md5sum_digest, file_data, file_length);
+            if (rv != APR_SUCCESS) {
+                DIE("Couldn't create MD5 hashsum from %ld bytes of BLOB input. This should never happen.", file_info.size);
+            }
+            file_md5sum_base64 = apr_palloc(pool, APR_ALIGN_DEFAULT(apr_base64_encode_len(APR_MD5_DIGESTSIZE)));
+
+            apr_base64_encode((char*)file_md5sum_base64, (char*)file_md5sum_digest, APR_MD5_DIGESTSIZE);
+
+            DEBUG_MSG("BLOB to be uploaded MD5sum base64: %s\n", file_md5sum_base64);
+            DEBUG_MSG("BLOB to be uploaded MD5sum hex:    %s\n", apr_pescape_hex(pool, file_md5sum_digest, APR_MD5_DIGESTSIZE, 0));
+
+            file_length_str = apr_ltoa(pool, file_length);
+            x_content_length_h = apr_pstrcat(pool, "Content-Length:", file_length_str, NULL);
+            x_ms_blob_content_md5 = apr_pstrcat(pool, "x-ms-blob-content-md5:", file_md5sum_base64, NULL);
+
+            canonicalized_headers = apr_pstrcat(pool, x_ms_blob_content_md5, "\n", x_ms_blob_content_type_h, "\n", x_ms_blob_type_h, "\n", x_ms_client_request_id_h, "\n", x_ms_date_h, "\n", x_ms_version_h, NULL);
+            canonicalized_resource = apr_pstrcat(pool, "/", conf->azure_storage_account, "/", conf->azure_container, "/", conf->blob_name, NULL);
+            string_to_sign = apr_pstrcat(pool, request_method, "\n\n\n", file_length_str, "\n\napplication/octet-stream\n\n\n\n\n\n\n", canonicalized_headers, "\n", canonicalized_resource, NULL);
+
+            if(conf->action & TEST_REGIME) {
+                url = apr_pstrcat(pool, "http://", conf->blob_store_url, "/", conf->azure_storage_account, "/", conf->azure_container, "/", conf->blob_name, NULL);
+            } else {
+                url = apr_pstrcat(pool, "https://", conf->azure_storage_account, ".", conf->blob_store_url, "/", conf->azure_container, "/", conf->blob_name, NULL);
+            }
+        }
+        else {
+            DIE("No known action was specified. It should never happen at this point.\n");
+        }
+
+        // cURL Call to action...
+        headers = curl_slist_append(headers, x_ms_date_h);
+        curl_slist_append(headers, x_ms_version_h);
+        curl_slist_append(headers, x_ms_client_request_id_h);
+        curl_slist_append(headers, x_content_length_h);
+        if(conf->action & WRITE_BLOB) {
+            curl_slist_append(headers, x_content_type_h);
+            curl_slist_append(headers, x_ms_blob_content_type_h);
+            curl_slist_append(headers, x_ms_blob_type_h);
+            curl_slist_append(headers, x_ms_blob_content_md5);
+        }
+        curl_slist_append(headers, produce_authorization_header(conf->azure_storage_key, conf->azure_storage_account, string_to_sign));
+
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &data);
         // TODO: Make configurable
@@ -298,61 +414,17 @@ int main(int argc, char *argv[]) {
         curl_easy_setopt(curl, CURLOPT_TCP_KEEPIDLE, 10000);
         curl_easy_setopt(curl, CURLOPT_TCP_KEEPINTVL, 1000);
         curl_easy_setopt(curl, CURLOPT_USERAGENT, USER_AGENT);
-
-        char* url;
-        char* request_method;
-        char request_date[APR_RFC822_DATE_LEN];
-        apr_rfc822_date(request_date,apr_time_now());
-        //TODO: Probably could remain fixed. The API version is intimatelydd
-        char* storage_service_version="2016-05-31";
-        // https://docs.microsoft.com/en-us/rest/api/storageservices/put-blob#request-headers-all-blob-types
-        char* client_request_id = "mod_cloud_storage";
-        // HTTP Request headers
-        char* x_ms_date_h = apr_pstrcat(pool, "x-ms-date:", request_date, NULL);
-        char* x_ms_version_h = apr_pstrcat(pool, "x-ms-version:", storage_service_version, NULL);
-        char* x_ms_client_request_id_h = apr_pstrcat(pool,"x-ms-client-request-id:", client_request_id, NULL);
-        char* canonicalized_headers = apr_pstrcat(pool, x_ms_client_request_id_h, "\n", x_ms_date_h, "\n", x_ms_version_h, NULL);
-        char* canonicalized_resource;
-        char* string_to_sign;
-
-
-        /* ACTIONS */
-        //TODO: SO far only creating a new container and listing blobs in a container is implemented...
-
-        if(conf->action & CREATE_CONTAINER) {
-            request_method="PUT";
-            canonicalized_resource = apr_pstrcat(pool, "/", conf->azure_storage_account, "/", conf->azure_container, NULL);
-            string_to_sign = apr_pstrcat(pool, request_method,"\n\n\n\napplication/octet-stream\n\n\n\n\n\n\n", canonicalized_headers, "\n", canonicalized_resource, NULL);
-            if(conf->action & TEST_REGIME) {
-                url = apr_pstrcat(pool, "http://", conf->blob_store_url, "/", conf->azure_storage_account, "/", conf->azure_container, "?restype=container", NULL);
-            } else {
-                url = apr_pstrcat(pool, "https://", conf->azure_storage_account, ".", conf->blob_store_url, "/", conf->azure_container, "?restype=container", NULL);
-            }
-        } else if(conf->action & LIST_BLOBS) {
-            request_method="GET";
-            canonicalized_resource = apr_pstrcat(pool, "/", conf->azure_storage_account, "/", conf->azure_container, "\ncomp:list\nrestype:container", NULL);
-            string_to_sign = apr_pstrcat(pool, request_method,"\n\n\n\n\n\n\n\n\n\n\n\n", canonicalized_headers, "\n", canonicalized_resource, NULL);
-            if(conf->action & TEST_REGIME) {
-                url = apr_pstrcat(pool, "http://", conf->blob_store_url, "/", conf->azure_storage_account, "/", conf->azure_container, "?restype=container&comp=list", NULL);
-            } else {
-                url = apr_pstrcat(pool, "https://", conf->azure_storage_account, ".", conf->blob_store_url, "/", conf->azure_container, "?restype=container&comp=list", NULL);
-            }
-        } else {
-            DIE("No known action was specified. It should never happen at this point.\n");
-        }
-
-
-
-        headers = curl_slist_append(headers, x_ms_date_h);
-        curl_slist_append(headers, x_ms_version_h);
-        curl_slist_append(headers, x_ms_client_request_id_h);
-        curl_slist_append(headers, produce_authorization_header(conf->azure_storage_key, conf->azure_storage_account, string_to_sign));
-
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
         curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, request_method);
+        if(conf->action & WRITE_BLOB) {
+            curl_easy_setopt(curl, CURLOPT_READFUNCTION, read_callback);
+            curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
+            curl_easy_setopt(curl, CURLOPT_READDATA, file_data);
+            curl_easy_setopt(curl, CURLOPT_INFILESIZE_LARGE, (curl_off_t)file_length);
+        }
         curl_easy_setopt(curl, CURLOPT_URL, url);
 
-        // Go go go...
+        // Here we block on the web request
         CURLcode err = curl_easy_perform(curl);
 
         int http_code = 0;
@@ -376,13 +448,11 @@ int main(int argc, char *argv[]) {
 
          Response Body: <?xml version='1.0'?><EnumerationResults ServiceEndpoint="http://localhost:10000/devstoreaccount1" ContainerName="mod-cloud-storage"><Blobs><Blob><Name>test</Name><Properties><BlobType>BlockBlob</BlobType><LeaseStatus>unlocked</LeaseStatus><LeaseState>available</LeaseState><ServerEncrypted>false</ServerEncrypted><Last-Modified>Thu, 24 Aug 2017 15:34:29 GMT</Last-Modified><ETag>0</ETag><Content-Type>application/octet-stream</Content-Type><Content-Encoding>undefined</Content-Encoding><Content-MD5>VA/zHcYvgkcsRR9LRKbv2Q==</Content-MD5></Properties></Blob></Blobs><BlobPrefix><name></name></BlobPrefix></EnumerationResults>
         */
-
     } else {
         DIE("CURL wasn't initialized.\n");
     }
 
     free_connection();
-    //apr_file_close(fp);
     apr_pool_destroy(pool);
     apr_terminate();
     return 0;
