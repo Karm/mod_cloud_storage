@@ -252,7 +252,8 @@ int main(int argc, char *argv[]) {
     }
 
     if(!conf->blob_store_url || strlen(conf->blob_store_url) < 8) {
-        DIE("Blob_store_url must be specified either as an env var MCS_BLOB_STORE_URL or as a parameter --blob_store_url with its string value being at least 8 characters long including schema (https or http).\n");
+       // Set a reasonable default: https://docs.microsoft.com/en-us/azure/storage/common/storage-create-storage-account#storage-account-endpoints
+        conf->blob_store_url= "blob.core.windows.net";
     }
 
     if(strncmp(conf->blob_store_url, "http", 4) == 0) {
@@ -286,13 +287,14 @@ int main(int argc, char *argv[]) {
 
         const char* canonicalized_headers;
         const char* canonicalized_resource;
+        // See for all those \n: https://docs.microsoft.com/en-us/rest/api/storageservices/authentication-for-the-azure-storage-services
         char* string_to_sign;
 
         // Writing/Reading Blobs
-        const char* x_ms_blob_content_type_h="x-ms-blob-content-type:application/octet-stream";
-        const char* x_content_type_h="Content-Type:application/octet-stream";
-        const char* x_ms_blob_type_h="x-ms-blob-type:BlockBlob";
-        const char* x_content_length_h;
+        const char* x_ms_blob_content_type_h = "x-ms-blob-content-type:application/octet-stream";
+        const char* x_content_type_h = "Content-Type:application/octet-stream";
+        const char* x_ms_blob_type_h = "x-ms-blob-type:BlockBlob";
+        char* x_content_length_h = "Content-Length:0";
         const char* x_ms_blob_content_md5;
         const char* file_length_str;
         unsigned char file_md5sum_digest[APR_MD5_DIGESTSIZE];
@@ -310,8 +312,8 @@ int main(int argc, char *argv[]) {
 
         if(conf->action & CREATE_CONTAINER) {
             canonicalized_headers = apr_pstrcat(pool, x_ms_client_request_id_h, "\n", x_ms_date_h, "\n", x_ms_version_h, NULL);
-            canonicalized_resource = apr_pstrcat(pool, "/", conf->azure_storage_account, "/", conf->azure_container, NULL);
-            string_to_sign = apr_pstrcat(pool, request_method,"\n\n\n\napplication/octet-stream\n\n\n\n\n\n\n", canonicalized_headers, "\n", canonicalized_resource, NULL);
+            canonicalized_resource = apr_pstrcat(pool, "/", conf->azure_storage_account, "/", conf->azure_container, "\nrestype:container", NULL);
+            string_to_sign = apr_pstrcat(pool, request_method,"\n\n\n\n\n\n\n\n\n\n\n\n", canonicalized_headers, "\n", canonicalized_resource, NULL);
 
             if(conf->action & TEST_REGIME) {
                 url = apr_pstrcat(pool, "http://", conf->blob_store_url, "/", conf->azure_storage_account, "/", conf->azure_container, "?restype=container", NULL);
@@ -394,14 +396,14 @@ int main(int argc, char *argv[]) {
         headers = curl_slist_append(headers, x_ms_date_h);
         curl_slist_append(headers, x_ms_version_h);
         curl_slist_append(headers, x_ms_client_request_id_h);
-        curl_slist_append(headers, produce_authorization_header(conf->azure_storage_key, conf->azure_storage_account, string_to_sign));
+        curl_slist_append(headers, x_content_length_h);
         if(conf->action & WRITE_BLOB) {
-            curl_slist_append(headers, x_ms_blob_content_type_h);
             curl_slist_append(headers, x_content_type_h);
+            curl_slist_append(headers, x_ms_blob_content_type_h);
             curl_slist_append(headers, x_ms_blob_type_h);
-            curl_slist_append(headers, x_content_length_h);
             curl_slist_append(headers, x_ms_blob_content_md5);
         }
+        curl_slist_append(headers, produce_authorization_header(conf->azure_storage_key, conf->azure_storage_account, string_to_sign));
 
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &data);
