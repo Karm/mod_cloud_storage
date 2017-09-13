@@ -1,5 +1,5 @@
-# mod_cloud_storage
-Storing and reading BLOBs to and from a cloud service.
+# About
+Storing and reading BLOBs to and from a cloud service. The project will consist of a library, command line tool, Apache HTTP Server module and an Nginx module. Currently, the command line tool is work in progress.
 
 # Building
  * cmake
