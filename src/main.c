@@ -5,7 +5,7 @@
  * TODO: Description
  *
  * TODO: print usage, help
- * TODO: unsigned char* vs. char* hell, apr vs. openssl "string" taking parameters
+ * TODO: unsigned char* vs. char* hell, APR vs. OpenSSL "string" taking parameters
  *
  */
 #include <stdio.h>
@@ -108,7 +108,7 @@ static size_t write_callback(void *contents, size_t size, size_t nmemb, void *us
 
 static size_t read_callback(void *ptr, size_t size, size_t nmemb, void *stream) {
     /* This API is designed to read from files, streams, but we already did that, we have the data ready.
-     * Supressing -Wunused-parameter with:
+     * Suppressing -Wunused-parameter with:
      */
     (void)size;
     (void)nmemb;
@@ -282,7 +282,7 @@ int main(int argc, char *argv[]) {
         const char* request_method;
         char request_date[APR_RFC822_DATE_LEN];
         apr_rfc822_date(request_date,apr_time_now());
-        // TODO: Probably could remain fixed. The API version is intimatelydd
+        // TODO: Probably could remain fixed. The API version is intimately related to the required headers and their format.
         const char* storage_service_version="2016-05-31";
         // https://docs.microsoft.com/en-us/rest/api/storageservices/put-blob#request-headers-all-blob-types
         const char* client_request_id = "mod_cloud_storage";
@@ -468,7 +468,7 @@ int main(int argc, char *argv[]) {
             if(written_bytes != data.size) {
                 DIE("This should never happen. Only %ld out of %ld bytes written and yet there was no error. File was: %s.\n?", written_bytes, data.size, conf->path_to_file);
             }
-            printf("%ld bytes of response writen to %s.\n", written_bytes, conf->path_to_file);
+            printf("%ld bytes of response written to %s.\n", written_bytes, conf->path_to_file);
         } else {
             printf("Response Body followed by \\n:%s\n", data.response_body);
         }
