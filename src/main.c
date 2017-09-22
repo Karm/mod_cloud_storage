@@ -107,7 +107,12 @@ static size_t write_callback(void *contents, size_t size, size_t nmemb, void *us
 }
 
 static size_t read_callback(void *ptr, size_t size, size_t nmemb, void *stream) {
-    // This API is designed to read from files, streams, but we already did that, we have the data ready.
+    /* This API is designed to read from files, streams, but we already did that, we have the data ready.
+     * Supressing -Wunused-parameter with:
+     */
+    (void)size;
+    (void)nmemb;
+
     memcpy(ptr, stream, file_length);
     return file_length;
 }
@@ -125,6 +130,7 @@ const char* produce_authorization_header(char* azure_storage_key, char* azure_st
 int main(int argc, char *argv[]) {
 
     apr_status_t rv;
+    char err_msg[256];
 
     rv = apr_initialize();
     if (rv != APR_SUCCESS) {
@@ -252,7 +258,7 @@ int main(int argc, char *argv[]) {
     }
 
     if(!conf->blob_store_url || strlen(conf->blob_store_url) < 8) {
-       // Set a reasonable default: https://docs.microsoft.com/en-us/azure/storage/common/storage-create-storage-account#storage-account-endpoints
+        // Set a reasonable default: https://docs.microsoft.com/en-us/azure/storage/common/storage-create-storage-account#storage-account-endpoints
         conf->blob_store_url= "blob.core.windows.net";
     }
 
@@ -302,6 +308,11 @@ int main(int argc, char *argv[]) {
         apr_file_t *filep = NULL;
         apr_finfo_t file_info;
         char* file_data;
+
+        // cURL headers
+        headers = curl_slist_append(headers, x_ms_date_h);
+        curl_slist_append(headers, x_ms_version_h);
+        curl_slist_append(headers, x_ms_client_request_id_h);
 
         // ACTIONS
         if(conf->action & CREATE_CONTAINER || conf->action & WRITE_BLOB) {
@@ -387,22 +398,26 @@ int main(int argc, char *argv[]) {
             } else {
                 url = apr_pstrcat(pool, "https://", conf->azure_storage_account, ".", conf->blob_store_url, "/", conf->azure_container, "/", conf->blob_name, NULL);
             }
-        }
-        else {
-            DIE("No known action was specified. It should never happen at this point.\n");
-        }
-
-        // cURL Call to action...
-        headers = curl_slist_append(headers, x_ms_date_h);
-        curl_slist_append(headers, x_ms_version_h);
-        curl_slist_append(headers, x_ms_client_request_id_h);
-        curl_slist_append(headers, x_content_length_h);
-        if(conf->action & WRITE_BLOB) {
             curl_slist_append(headers, x_content_type_h);
             curl_slist_append(headers, x_ms_blob_content_type_h);
             curl_slist_append(headers, x_ms_blob_type_h);
             curl_slist_append(headers, x_ms_blob_content_md5);
+        } else if(conf->action & READ_BLOB) {
+            canonicalized_headers = apr_pstrcat(pool, x_ms_client_request_id_h, "\n", x_ms_date_h, "\n", x_ms_version_h, NULL);
+            canonicalized_resource = apr_pstrcat(pool, "/", conf->azure_storage_account, "/", conf->azure_container, "/", conf->blob_name, NULL);
+            string_to_sign = apr_pstrcat(pool, request_method,"\n\n\n\n\n\n\n\n\n\n\n\n", canonicalized_headers, "\n", canonicalized_resource, NULL);
+
+            if(conf->action & TEST_REGIME) {
+                url = apr_pstrcat(pool, "http://", conf->blob_store_url, "/", conf->azure_storage_account, "/", conf->azure_container, "/", conf->blob_name, NULL);
+            } else {
+                url = apr_pstrcat(pool, "https://", conf->azure_storage_account, ".", conf->blob_store_url, "/", conf->azure_container, "/", conf->blob_name, NULL);
+            }
+        } else {
+            DIE("No known action was specified. It should never happen at this point.\n");
         }
+
+        // cURL Call to action...
+        curl_slist_append(headers, x_content_length_h);
         curl_slist_append(headers, produce_authorization_header(conf->azure_storage_key, conf->azure_storage_account, string_to_sign));
 
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
@@ -436,7 +451,27 @@ int main(int argc, char *argv[]) {
             DEBUG_MSG("      URL was: %s\n", url);
         }
         DEBUG_MSG("Response Code: %d\n", http_code);
-        DEBUG_MSG("Response Body: %s\n", data.response_body);
+
+        if(conf->action & READ_BLOB && conf->path_to_file && strlen(conf->path_to_file) > 0) {
+            rv = apr_file_open(&filep, conf->path_to_file, APR_FOPEN_CREATE|APR_FOPEN_WRITE|APR_BUFFERED, APR_OS_DEFAULT, pool);
+            if (rv != APR_SUCCESS) {
+                DIE("Path to file %s was specified, but it doesn't exist or cannot be opened for writing. Error: %s\n", conf->path_to_file, apr_strerror(rv, err_msg, sizeof(err_msg)));
+            }
+            DEBUG_MSG("Writing to file: %s\n", conf->path_to_file);
+            // This op could block forever
+            size_t written_bytes;
+            rv = apr_file_write_full(filep, data.response_body, data.size, &written_bytes);
+            apr_file_close(filep);
+            if (rv != APR_SUCCESS) {
+                DIE("Failed to write %ld bytes to the file %s. I/O Error?\n", data.size, conf->path_to_file);
+            }
+            if(written_bytes != data.size) {
+                DIE("This should never happen. Only %ld out of %ld bytes written and yet there was no error. File was: %s.\n?", written_bytes, data.size, conf->path_to_file);
+            }
+            printf("%ld bytes of response writen to %s.\n", written_bytes, conf->path_to_file);
+        } else {
+            printf("Response Body followed by \\n:%s\n", data.response_body);
+        }
 
         /*
          TODO: Should we react to specific states or just spit them out?
