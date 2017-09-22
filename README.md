@@ -95,9 +95,9 @@ Neither *MCS_PATH_TO_FILE* nor *--path_to_file* was specified, so the content of
 Response Code: 200
 Response Body followed by \n:Silence is golden.
 ```
-Note that if the path to file is specified, the content of the file is **overwritten**, not appended to.
+Note that if a path to the file is specified, the content of the file is **overwritten**, not appended to.
 
-## Working with real Azure storage
+## Working with a real Azure storage
  * [Create your Azure profile](https://azure.microsoft.com/en-us/free/) if you don't have one.
  * Create a Storage account if you don't have one, Name, Resource group, all arbitrary. If you need help with this terminology, read [Azure Storage manual](https://docs.microsoft.com/en-us/azure/storage/common/storage-introduction). In this example, we use new Storage account **karmdelete**.<br>
    <a href="docs/img/00-new-storage.gif" target="blank"><img src="docs/img/00-new-storage.gif" width="250" height="250"/></a>
