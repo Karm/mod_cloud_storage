@@ -15,7 +15,7 @@ The command line tool is controlled via env variables and command line arguments
 
 ## Env variables
 ```
-MCS_ACTION=READ_BLOB|WRITE_BLOB|LIST_BLOBS|CREATE_CONTAINER
+MCS_ACTION=READ_BLOB|WRITE_BLOB|DELETE_BLOB|LIST_BLOBS|CREATE_CONTAINER
 MCS_AZURE_STORAGE_KEY=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==
 MCS_AZURE_STORAGE_ACCOUNT=devstoreaccount1
 MCS_AZURE_BLOB_NAME=test
@@ -97,6 +97,19 @@ Response Body followed by \n:Silence is golden.
 ```
 Note that if a path to the file is specified, the content of the file is **overwritten**, not appended to.
 
+# Deleting the BLOB from the container
+Exactly the same as reading the BLOB but for the ```action``` parameter:
+```
+--action DELETE_BLOB
+```
+Output (DEBUG):
+```
+ libcurl said: No error
+Response Code: 202
+Response Body followed by \n:(null)
+```
+Note that the current implementation deletes **all blob's snapshots** too. Regarding leases, the current implementation does not deal with leases on blobs, so if there is a lease on the blob, the delete action fails.
+
 ## Working with a real Azure storage
  * [Create your Azure profile](https://azure.microsoft.com/en-us/free/) if you don't have one.
  * Create a Storage account if you don't have one, Name, Resource group, all arbitrary. If you need help with this terminology, read [Azure Storage manual](https://docs.microsoft.com/en-us/azure/storage/common/storage-introduction). In this example, we use new Storage account **karmdelete**.<br>
@@ -154,4 +167,5 @@ Note that if a path to the file is specified, the content of the file is **overw
     Writing to file: /tmp/test_out
     19 bytes of response written to /tmp/test_out.
     ```
+ * One can delete the aforementioned blob with the same command as for reading it but for the action attribute which is supposed to change to: ```DELETE_BLOB```.
  * **Do not use a storage account with valuable containers in it. This tool is just a toy.**

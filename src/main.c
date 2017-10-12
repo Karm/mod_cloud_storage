@@ -10,7 +10,9 @@
  */
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
+#include <strings.h>
+// TODO: ifdef on Windows build
+#include <linux/limits.h>
 
 #include <apr_time.h>
 #include <apr_file_io.h>
@@ -27,7 +29,7 @@
 #include <openssl/sha.h>
 
 // TODO: CMake injected version?
-#define USER_AGENT   "mod_cloud_storage 0.3"
+#define USER_AGENT   "mod_cloud_storage 0.4"
 
 //TODO: Isn't it just stupid to assume 1K? Make it configurable? LIST_BLOBS XML response listing 1 blob called "test" is 630 bytes long...
 #define INITIAL_RESPONSE_MEM 1024
@@ -58,10 +60,13 @@ struct my_response {
 enum {
     UNDEFINED        = 0x0001,
     READ_BLOB        = 0x0002,
+    //TODO: Implement READ_BLOB_METADATA to get ETag https://docs.microsoft.com/en-us/rest/api/storageservices/get-blob-metadata
     WRITE_BLOB       = 0x0004,
-    LIST_BLOBS       = 0x0008,
-    CREATE_CONTAINER = 0x0010,
-    TEST_REGIME      = 0x0020
+    DELETE_BLOB      = 0x0008,
+    LIST_BLOBS       = 0x0010,
+    CREATE_CONTAINER = 0x0020,
+    DELETE_CONTAINER = 0x0030,
+    TEST_REGIME      = 0x0040
 };
 
 struct cloud_configuration {
@@ -142,12 +147,12 @@ int main(int argc, char *argv[]) {
 
     //TODO: Resolve debug macro...
     /*
-#ifdef DEBUG
-    for(int i = 1; i < argc; i++) {
-        printf("%s  -- strncmp(\"--key\", argv[i], 5) is %d\n", argv[i], strncmp("--key",argv[i], 6));
-    }
-    printf("\n");
-#endif*/
+    #ifdef DEBUG
+        for(int i = 1; i < argc; i++) {
+            printf("%s  -- strncmp(\"--key\", argv[i], 5) is %d\n", argv[i], strncmp("--key",argv[i], 6));
+        }
+        printf("\n");
+    #endif*/
 
     cloud_configuration *conf = (cloud_configuration*) apr_pcalloc(pool, APR_ALIGN_DEFAULT( sizeof(cloud_configuration) ));
 
@@ -157,10 +162,14 @@ int main(int argc, char *argv[]) {
             conf->action = READ_BLOB;
         } else if(strncasecmp(msc_action, "WRITE_BLOB", 10) == 0) {
             conf->action = WRITE_BLOB;
+        } else if(strncasecmp(msc_action, "DELETE_BLOB", 11) == 0) {
+            conf->action = DELETE_BLOB;
         } else if(strncasecmp(msc_action, "LIST_BLOBS", 10) == 0) {
             conf->action = LIST_BLOBS;
         } else if(strncasecmp(msc_action, "CREATE_CONTAINER", 16) == 0) {
             conf->action = CREATE_CONTAINER;
+        } else if(strncasecmp(msc_action, "DELETE_CONTAINER", 16) == 0) {
+            conf->action = DELETE_CONTAINER;
         } else {
             conf->action = UNDEFINED;
         }
@@ -187,10 +196,14 @@ int main(int argc, char *argv[]) {
                     conf->action = READ_BLOB | (conf->action & TEST_REGIME);
                 } else if(strncasecmp(argv[i+1], "WRITE_BLOB", 10) == 0) {
                     conf->action = WRITE_BLOB | (conf->action & TEST_REGIME);
+                } else if(strncasecmp(argv[i+1], "DELETE_BLOB", 11) == 0) {
+                    conf->action = DELETE_BLOB | (conf->action & TEST_REGIME);
                 } else if(strncasecmp(argv[i+1], "LIST_BLOBS", 10) == 0) {
                     conf->action = LIST_BLOBS | (conf->action & TEST_REGIME);
                 } else if(strncasecmp(argv[i+1], "CREATE_CONTAINER", 16) == 0) {
                     conf->action = CREATE_CONTAINER | (conf->action & TEST_REGIME);
+                } else if(strncasecmp(argv[i+1], "DELETE_CONTAINER", 16) == 0) {
+                    conf->action = DELETE_CONTAINER | (conf->action & TEST_REGIME);
                 }
             }
             i++;
@@ -249,7 +262,7 @@ int main(int argc, char *argv[]) {
         DIE("Azure_storage_account must be specified either as an env var MCS_AZURE_STORAGE_ACCOUNT or as a parameter --azure_storage_account with its string value being at least 2 characters long.\n");
     }
 
-    if((conf->action & READ_BLOB || conf->action & WRITE_BLOB) && (!conf->blob_name || strlen(conf->blob_name) < 1)) {
+    if((conf->action & READ_BLOB || conf->action & WRITE_BLOB || conf->action & DELETE_BLOB) && (!conf->blob_name || strlen(conf->blob_name) < 1)) {
         DIE("Blob_name must be specified either as an env var MCS_AZURE_BLOB_NAME or as a parameter --blob_name with its string value being at least 1 character long.\n");
     }
 
@@ -282,7 +295,6 @@ int main(int argc, char *argv[]) {
         const char* request_method;
         char request_date[APR_RFC822_DATE_LEN];
         apr_rfc822_date(request_date,apr_time_now());
-        // TODO: Probably could remain fixed. The API version is intimately related to the required headers and their format.
         const char* storage_service_version="2016-05-31";
         // https://docs.microsoft.com/en-us/rest/api/storageservices/put-blob#request-headers-all-blob-types
         const char* client_request_id = "mod_cloud_storage";
@@ -293,7 +305,7 @@ int main(int argc, char *argv[]) {
 
         const char* canonicalized_headers;
         const char* canonicalized_resource;
-        // See for all those \n: https://docs.microsoft.com/en-us/rest/api/storageservices/authentication-for-the-azure-storage-services
+        // See for all those: https://docs.microsoft.com/en-us/rest/api/storageservices/authentication-for-the-azure-storage-services
         char* string_to_sign;
 
         // Writing/Reading Blobs
@@ -301,6 +313,7 @@ int main(int argc, char *argv[]) {
         const char* x_content_type_h = "Content-Type:application/octet-stream";
         const char* x_ms_blob_type_h = "x-ms-blob-type:BlockBlob";
         char* x_content_length_h = "Content-Length:0";
+        char* x_ms_delete_snapshots = "x-ms-delete-snapshots:include";
         const char* x_ms_blob_content_md5;
         const char* file_length_str;
         unsigned char file_md5sum_digest[APR_MD5_DIGESTSIZE];
@@ -317,6 +330,8 @@ int main(int argc, char *argv[]) {
         // ACTIONS
         if(conf->action & CREATE_CONTAINER || conf->action & WRITE_BLOB) {
             request_method="PUT";
+        } else if(conf->action & DELETE_CONTAINER || conf->action & DELETE_BLOB) {
+            request_method="DELETE";
         } else {
             request_method="GET";
         }
@@ -331,6 +346,8 @@ int main(int argc, char *argv[]) {
             } else {
                 url = apr_pstrcat(pool, "https://", conf->azure_storage_account, ".", conf->blob_store_url, "/", conf->azure_container, "?restype=container", NULL);
             }
+        } else if(conf->action & DELETE_CONTAINER) {
+            DIE("Not implemented.\n");
         } else if(conf->action & LIST_BLOBS) {
             canonicalized_headers = apr_pstrcat(pool, x_ms_client_request_id_h, "\n", x_ms_date_h, "\n", x_ms_version_h, NULL);
             canonicalized_resource = apr_pstrcat(pool, "/", conf->azure_storage_account, "/", conf->azure_container, "\ncomp:list\nrestype:container", NULL);
@@ -363,7 +380,7 @@ int main(int argc, char *argv[]) {
             }
             // TODO: Verify if pertinent...
             //       head -c256  /dev/urandom | xxd -p -c256 > /home/karm/Projects/mod_cloud_storage/testdata
-            //if(fi.size < 512) {
+            //if(file_info.size < 512) {
             //    ERR_MSG("Warning: The BLOB to be written is only %ld long. The smallest write operation is 512B. The rest of the blob will be zeroes.\n", file_info.size);
             //}
             file_data = apr_palloc(pool, file_info.size);
@@ -402,6 +419,17 @@ int main(int argc, char *argv[]) {
             curl_slist_append(headers, x_ms_blob_content_type_h);
             curl_slist_append(headers, x_ms_blob_type_h);
             curl_slist_append(headers, x_ms_blob_content_md5);
+        } else if(conf->action & DELETE_BLOB) {
+            canonicalized_headers = apr_pstrcat(pool, x_ms_client_request_id_h, "\n", x_ms_date_h, "\n", x_ms_delete_snapshots, "\n", x_ms_version_h, NULL);
+            canonicalized_resource = apr_pstrcat(pool, "/", conf->azure_storage_account, "/", conf->azure_container, "/", conf->blob_name, NULL);
+            string_to_sign = apr_pstrcat(pool, request_method,"\n\n\n\n\n\n\n\n\n\n\n\n", canonicalized_headers, "\n", canonicalized_resource, NULL);
+
+            if(conf->action & TEST_REGIME) {
+                url = apr_pstrcat(pool, "http://", conf->blob_store_url, "/", conf->azure_storage_account, "/", conf->azure_container, "/", conf->blob_name, NULL);
+            } else {
+                url = apr_pstrcat(pool, "https://", conf->azure_storage_account, ".", conf->blob_store_url, "/", conf->azure_container, "/", conf->blob_name, NULL);
+            }
+            curl_slist_append(headers, x_ms_delete_snapshots);
         } else if(conf->action & READ_BLOB) {
             canonicalized_headers = apr_pstrcat(pool, x_ms_client_request_id_h, "\n", x_ms_date_h, "\n", x_ms_version_h, NULL);
             canonicalized_resource = apr_pstrcat(pool, "/", conf->azure_storage_account, "/", conf->azure_container, "/", conf->blob_name, NULL);
